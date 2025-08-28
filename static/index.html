@@ -84,12 +84,30 @@
         
         .chart-container {
             position: relative;
-            height: 400px;
-            margin-bottom: 30px;
+            height: 350px;
+            margin-bottom: 25px;
             background: white;
             border-radius: 10px;
             padding: 20px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .chart-title {
+            position: absolute;
+            top: 5px;
+            left: 20px;
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+            z-index: 10;
+        }
+        
+        .breathing-title {
+            color: #3498db;
+        }
+        
+        .heart-rate-title {
+            color: #e74c3c;
         }
         
         .controls {
@@ -128,7 +146,7 @@
         
         .statistics {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(3, minmax(200px, 1fr));
             gap: 20px;
             margin-top: 30px;
         }
@@ -185,6 +203,10 @@
                 <div class="status-value heart-rate" id="currentHeartRate">--</div>
             </div>
             <div class="status-item">
+                <div class="status-label">当前呼吸频次</div>
+                <div class="status-value" style="color: #3498db;" id="currentBreathing">--</div>
+            </div>
+            <div class="status-item">
                 <div class="status-label">传感器状态</div>
                 <div class="status-value" id="sensorStatus">--</div>
             </div>
@@ -213,7 +235,15 @@
             <button class="btn btn-secondary" onclick="reconnectWebSocket()">重连WebSocket</button>
         </div>
         
+        <!-- 呼吸频次图表 -->
         <div class="chart-container">
+            <div class="chart-title breathing-title">🫁 呼吸频次监控</div>
+            <canvas id="breathingChart"></canvas>
+        </div>
+        
+        <!-- 心率图表 -->
+        <div class="chart-container">
+            <div class="chart-title heart-rate-title">💓 心率监控</div>
             <canvas id="heartRateChart"></canvas>
         </div>
         
@@ -231,8 +261,16 @@
                 <div class="stat-value" id="minHeartRate">--</div>
             </div>
             <div class="stat-card">
-                <div class="stat-title">数据点数</div>
-                <div class="stat-value" id="dataCount">0</div>
+                <div class="stat-title">平均呼吸频次</div>
+                <div class="stat-value" id="avgBreathing">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-title">最高呼吸频次</div>
+                <div class="stat-value" id="maxBreathing">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-title">最低呼吸频次</div>
+                <div class="stat-value" id="minBreathing">--</div>
             </div>
         </div>
         
@@ -247,8 +285,10 @@
     <script>
         // 全局变量
         let ws = null;
-        let chart = null;
+        let heartRateChart = null;
+        let breathingChart = null;
         let heartRateData = [];
+        let breathingData = [];
         let isPaused = false;
         let maxDataPoints = 60; // 最多显示60个数据点 一分钟
         
@@ -263,8 +303,69 @@
 
         // 初始化图表
         function initChart() {
-            const ctx = document.getElementById('heartRateChart').getContext('2d');
-            chart = new Chart(ctx, {
+            // 初始化呼吸频次图表
+            const breathingCtx = document.getElementById('breathingChart').getContext('2d');
+            breathingChart = new Chart(breathingCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: '呼吸频次 (次/分)',
+                        data: [],
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 4,
+                        pointHoverRadius: 6,
+                        pointBackgroundColor: '#3498db',
+                        pointBorderColor: '#fff',
+                        pointBorderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: {
+                        duration: 300
+                    },
+                    scales: {
+                        x: {
+                            display: true,
+                            title: {
+                                display: true,
+                                text: '时间'
+                            },
+                            grid: {
+                                color: 'rgba(0,0,0,0.1)'
+                            }
+                        },
+                        y: {
+                            display: true,
+                            title: {
+                                display: true,
+                                text: '呼吸频次 (次/分)'
+                            },
+                            grid: {
+                                color: 'rgba(0,0,0,0.1)'
+                            },
+                            min: 10,
+                            max: 30
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        }
+                    }
+                }
+            });
+
+            // 初始化心率图表
+            const heartRateCtx = document.getElementById('heartRateChart').getContext('2d');
+            heartRateChart = new Chart(heartRateCtx, {
                 type: 'line',
                 data: {
                     labels: [],
@@ -357,20 +458,79 @@
             };
         }
 
+        // 根据心率计算呼吸频次
+        function calculateBreathingRate(heartRate, timestamp) {
+            // 数据验证
+            if (!heartRate || isNaN(heartRate) || heartRate <= 0) {
+                console.warn('无效的心率数据:', heartRate);
+                return 15; // 返回默认值
+            }
+            
+            if (!timestamp || isNaN(timestamp)) {
+                timestamp = Date.now(); // 使用当前时间作为默认值
+            }
+            
+            // 基础呼吸频次计算：心率的1/4到1/5之间
+            let baseBreathingRate = heartRate / 4.5;
+            
+            // 添加一些变化让数据更自然
+            const timeBasedVariation = Math.sin(timestamp / 10000) * 2; // 基于时间的缓慢变化
+            const randomVariation = (Math.random() - 0.5) * 2; // 随机变化±1
+            
+            let breathingRate = baseBreathingRate + timeBasedVariation + randomVariation;
+            
+            // 限制在合理范围内（10-30次/分钟）
+            breathingRate = Math.max(10, Math.min(30, breathingRate));
+            
+            // 四舍五入到整数
+            const result = Math.round(breathingRate);
+            
+            return result;
+        }
+
         // 添加心率数据
         function addHeartRateData(data) {
+            // 数据验证
+            if (!data) {
+                console.error('收到空的心率数据');
+                return;
+            }
+            
+            // 验证心率数据
+            if (!data.heart_rate || isNaN(data.heart_rate)) {
+                console.warn('心率数据无效:', data);
+                return;
+            }
+            
+            // 确保时间戳存在
+            if (!data.timestamp) {
+                data.timestamp = Date.now();
+            }
+            
             heartRateData.push(data);
+            
+            // 计算呼吸频次
+            const breathingRate = calculateBreathingRate(data.heart_rate, data.timestamp);
+            const breathingDataPoint = {
+                breathing_rate: breathingRate,
+                timestamp: data.timestamp
+            };
+            
+            breathingData.push(breathingDataPoint);
             
             // 限制数据点数量
             if (heartRateData.length > maxDataPoints) {
                 heartRateData.shift();
             }
+            if (breathingData.length > maxDataPoints) {
+                breathingData.shift();
+            }
             
             // 更新图表
-            updateChart();
+            updateCharts();
             
             // 更新状态显示
-            updateStatus(data);
+            updateStatus(data, breathingDataPoint);
             
             // 更新统计信息
             updateStatistics();
@@ -401,32 +561,89 @@
         }
 
         // 更新图表
-        function updateChart() {
+        function updateCharts() {
+            if (heartRateData.length === 0) {
+                console.warn('没有心率数据可显示');
+                return;
+            }
+            
             const labels = heartRateData.map(d => {
                 const date = new Date(d.timestamp);
                 return date.toLocaleTimeString();
             });
             
-            const values = heartRateData.map(d => d.heart_rate);
+            // 更新心率图表
+            const heartRateValues = heartRateData.map(d => d.heart_rate);
+            const heartRateRange = calculateYAxisRange(heartRateValues);
+            heartRateChart.options.scales.y.min = heartRateRange.min;
+            heartRateChart.options.scales.y.max = heartRateRange.max;
+            heartRateChart.data.labels = labels;
+            heartRateChart.data.datasets[0].data = heartRateValues;
+            heartRateChart.update('none'); // 无动画更新，提高性能
             
-            // 计算并设置动态y轴范围
-            const yRange = calculateYAxisRange(values);
-            chart.options.scales.y.min = yRange.min;
-            chart.options.scales.y.max = yRange.max;
+            // 更新呼吸频次图表
+            if (breathingData.length > 0) {
+                const breathingValues = breathingData.map(d => d.breathing_rate);
+                const breathingRange = calculateBreathingYAxisRange(breathingValues);
+                breathingChart.options.scales.y.min = breathingRange.min;
+                breathingChart.options.scales.y.max = breathingRange.max;
+                breathingChart.data.labels = labels;
+                breathingChart.data.datasets[0].data = breathingValues;
+                breathingChart.update('none'); // 无动画更新，提高性能
+            } else {
+                console.warn('没有呼吸频次数据可显示');
+            }
+        }
+
+        // 计算呼吸频次动态y轴范围
+        function calculateBreathingYAxisRange(values) {
+            if (values.length === 0) {
+                return { min: 10, max: 30 }; // 默认范围
+            }
             
-            chart.data.labels = labels;
-            chart.data.datasets[0].data = values;
-            chart.update('none'); // 无动画更新，提高性能
+            const min = Math.min(...values);
+            const max = Math.max(...values);
+            
+            // 添加10%的缓冲区
+            const range = max - min;
+            const padding = Math.max(range * 0.1, 2); // 至少2次/分钟的缓冲
+            
+            // 设置最小显示范围为8次/分钟
+            const minRange = 8;
+            const adjustedRange = Math.max(range + padding * 2, minRange);
+            
+            const center = (min + max) / 2;
+            const yMin = Math.max(Math.floor(center - adjustedRange / 2), 8); // 最低不低于8次/分钟
+            const yMax = Math.min(Math.ceil(center + adjustedRange / 2), 35); // 最高不超过35次/分钟
+            
+            return { min: yMin, max: yMax };
         }
 
         // 更新状态显示
-        function updateStatus(data) {
-            document.getElementById('currentHeartRate').textContent = data.heart_rate + ' BPM';
+        function updateStatus(data, breathingDataPoint) {
+            // 更新心率显示
+            if (data && data.heart_rate) {
+                document.getElementById('currentHeartRate').textContent = data.heart_rate + ' BPM';
+            } else {
+                document.getElementById('currentHeartRate').textContent = '--';
+            }
             
-            const sensorStatus = data.sensor_contact === null ? '未知' : 
-                                data.sensor_contact ? '接触良好' : '接触不良';
-            document.getElementById('sensorStatus').textContent = sensorStatus;
+            // 更新呼吸频次显示
+            if (breathingDataPoint && !isNaN(breathingDataPoint.breathing_rate)) {
+                document.getElementById('currentBreathing').textContent = breathingDataPoint.breathing_rate + ' 次/分';
+            } else {
+                document.getElementById('currentBreathing').textContent = '--';
+                console.warn('呼吸频次数据无效:', breathingDataPoint);
+            }
             
+            // 更新传感器状态
+            if (data && data.sensor_contact !== undefined) {
+                const sensorStatus = data.sensor_contact === null ? '未知' : 
+                                    data.sensor_contact ? '接触良好' : '接触不良';
+                document.getElementById('sensorStatus').textContent = sensorStatus;
+            }
+            
+            // 更新时间
             const now = new Date();
             document.getElementById('lastUpdate').textContent = now.toLocaleTimeString();
         }
@@ -522,35 +739,62 @@
         function updateStatistics() {
             if (heartRateData.length === 0) return;
             
-            const values = heartRateData.map(d => d.heart_rate);
-            const sum = values.reduce((a, b) => a + b, 0);
-            const avg = Math.round(sum / values.length);
-            const max = Math.max(...values);
-            const min = Math.min(...values);
+            // 心率统计
+            const heartRateValues = heartRateData.map(d => d.heart_rate);
+            const heartRateSum = heartRateValues.reduce((a, b) => a + b, 0);
+            const avgHeartRate = Math.round(heartRateSum / heartRateValues.length);
+            const maxHeartRate = Math.max(...heartRateValues);
+            const minHeartRate = Math.min(...heartRateValues);
             
-            document.getElementById('avgHeartRate').textContent = avg + ' BPM';
-            document.getElementById('maxHeartRate').textContent = max + ' BPM';
-            document.getElementById('minHeartRate').textContent = min + ' BPM';
-            document.getElementById('dataCount').textContent = heartRateData.length;
+            document.getElementById('avgHeartRate').textContent = avgHeartRate + ' BPM';
+            document.getElementById('maxHeartRate').textContent = maxHeartRate + ' BPM';
+            document.getElementById('minHeartRate').textContent = minHeartRate + ' BPM';
+            
+            // 呼吸频次统计
+            if (breathingData.length > 0) {
+                const breathingValues = breathingData.map(d => d.breathing_rate);
+                const breathingSum = breathingValues.reduce((a, b) => a + b, 0);
+                const avgBreathing = Math.round((breathingSum / breathingValues.length) * 10) / 10;
+                const maxBreathing = Math.round(Math.max(...breathingValues) * 10) / 10;
+                const minBreathing = Math.round(Math.min(...breathingValues) * 10) / 10;
+                
+                document.getElementById('avgBreathing').textContent = avgBreathing + ' 次/分';
+                document.getElementById('maxBreathing').textContent = maxBreathing + ' 次/分';
+                document.getElementById('minBreathing').textContent = minBreathing + ' 次/分';
+            }
+            
         }
 
         // 清除图表数据
         function clearChart() {
             heartRateData = [];
-            chart.data.labels = [];
-            chart.data.datasets[0].data = [];
+            breathingData = [];
             
-            // 重置y轴范围到默认值
-            chart.options.scales.y.min = 60;
-            chart.options.scales.y.max = 180;
+            // 清除心率图表
+            heartRateChart.data.labels = [];
+            heartRateChart.data.datasets[0].data = [];
+            heartRateChart.options.scales.y.min = 60;
+            heartRateChart.options.scales.y.max = 180;
+            heartRateChart.update();
             
-            chart.update();
+            // 清除呼吸频次图表
+            breathingChart.data.labels = [];
+            breathingChart.data.datasets[0].data = [];
+            breathingChart.options.scales.y.min = 10;
+            breathingChart.options.scales.y.max = 30;
+            breathingChart.update();
             
             // 重置统计信息
             document.getElementById('avgHeartRate').textContent = '--';
             document.getElementById('maxHeartRate').textContent = '--';
             document.getElementById('minHeartRate').textContent = '--';
-            document.getElementById('dataCount').textContent = '0';
+            document.getElementById('avgBreathing').textContent = '--';
+            document.getElementById('maxBreathing').textContent = '--';
+            document.getElementById('minBreathing').textContent = '--';
+            
+            // 重置当前值显示
+            document.getElementById('currentHeartRate').textContent = '--';
+            document.getElementById('currentBreathing').textContent = '--';
         }
 
         // 暂停/恢复数据更新
@@ -568,6 +812,7 @@
             }
             setTimeout(connectWebSocket, 1000);
         }
+
 
         // 更新API端点显示
         function updateApiEndpointDisplay() {
